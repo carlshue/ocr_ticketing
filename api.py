@@ -6,6 +6,8 @@ import cv2
 import logging
 from utils_ocr import clean_text, desleet_text
 
+
+#cmon man work
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = FastAPI()
