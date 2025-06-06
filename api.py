@@ -3,16 +3,19 @@ from fastapi.responses import JSONResponse
 import easyocr
 import numpy as np
 import cv2
+import logging
 from utils_ocr import clean_text, desleet_text
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # Inicializa EasyOCR una vez
 reader = easyocr.Reader(['es'])
 
 # Función para convertir una imagen subida en un array de OpenCV
-def read_imagefile(file) -> np.ndarray:
-    image_data = np.frombuffer(file, np.uint8)
+def read_imagefile(file_bytes: bytes) -> np.ndarray:
+    image_data = np.frombuffer(file_bytes, np.uint8)
     img = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
     return img
 
@@ -41,4 +44,5 @@ async def ocr_endpoint(file: UploadFile = File(...)):
         })
 
     except Exception as e:
+        logger.exception("Error en el endpoint /ocr")
         return JSONResponse(content={"error": str(e)}, status_code=500)
