@@ -13,6 +13,7 @@ import gc
 import uuid
 from datetime import datetime
 from pathlib import Path
+import json
 
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
@@ -224,7 +225,7 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
 
         logger.info(f"[{request_id}] Finished processing request.")
 
-        return JSONResponse(content=response_data)
+        return JSONResponse(content=response_data, dumps=lambda obj: json.dumps(obj, default=str))
 
     except TimeoutError as e:
         logger.error(f"[{request_id}] OCR request timed out.")
