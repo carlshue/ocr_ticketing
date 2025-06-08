@@ -8,17 +8,17 @@ Includes error handling, timeouts, memory cleanup, and logs CPU/RAM usage and cl
 import asyncio
 import logging
 import re
+import os
 import gc
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Required libraries
-
-import easyocr
 import numpy as np
 import cv2
 import psutil
@@ -44,13 +44,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # ----------------------------------------------------------
 # EasyOCR reader initialization and warm-up
 # ----------------------------------------------------------
+def ensure_easyocr_and_models(lang='es'):
+    """
+    Ensures that EasyOCR is installed and that its models are downloaded.
+    If missing, downloads them and initializes the reader.
+    """
+    try:
+        import easyocr
+    except ImportError:
+        logger.info("EasyOCR not found. Installing...")
+        import subprocess
+        subprocess.check_call(["pip", "install", "easyocr"])
+        import easyocr
+
+    # Check model path
+    home_dir = Path.home()
+    model_dir = home_dir / ".EasyOCR" / "model"
+    detection_model = model_dir / "detection" / "craft_mlt_25k.pth"
+    recognition_model = model_dir / "recognition" / f"{lang}.pth"
+
+    if not detection_model.exists() or not recognition_model.exists():
+        logger.info("EasyOCR models not found locally. Downloading them...")
+        reader = easyocr.Reader([lang], gpu=False)
+        dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+        reader.readtext(dummy_img)  # Forces download
+        logger.info("EasyOCR models downloaded successfully.")
+    else:
+        logger.info("EasyOCR models already present. Skipping download.")
+
+    # Return a reader instance
+    return easyocr.Reader([lang], gpu=False)
+
+
 logger.info("Initializing EasyOCR reader...")
-reader = easyocr.Reader(['es'], gpu=False)
-dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
-reader.readtext(dummy_img)
+reader = ensure_easyocr_and_models(lang='es')
 logger.info("EasyOCR reader ready.")
 
 # ----------------------------------------------------------
@@ -165,18 +196,21 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
         original_texts = []
         cleaned_texts = []
         confidences = []
+        bboxes = []
 
         for bbox, text, conf in results:
             cleaned, _ = desleet_text(clean_text(text))
             original_texts.append(text)
             cleaned_texts.append(cleaned)
             confidences.append(round(conf, 2))
+            bboxes.append(bbox)  # Añadimos la caja
 
         response_data = {
             "request_id": request_id,
             "original_texts": original_texts,
             "cleaned_texts": cleaned_texts,
             "confidences": confidences,
+            "bboxes": bboxes
         }
 
         # Memory cleanup
