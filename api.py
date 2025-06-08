@@ -2,26 +2,33 @@
 OCR API with FastAPI, EasyOCR, and system resource logging.
 
 This API receives an image, performs OCR, and returns the extracted text.
-Includes error handling, timeouts, and logs CPU/RAM usage for easier debugging.
+Includes error handling, timeouts, memory cleanup, and logs CPU/RAM usage and client info for easier debugging.
 """
 
 import asyncio
 import logging
-import os
 import re
+import gc
+import uuid
+from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 
 import easyocr
 import numpy as np
 import cv2
-import psutil  # for system resource usage
+import psutil
+import torch
 
 # ----------------------------------------------------------
 # Logging configuration
 # ----------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------
@@ -33,8 +40,7 @@ app = FastAPI()
 # EasyOCR reader initialization and warm-up
 # ----------------------------------------------------------
 logger.info("Initializing EasyOCR reader...")
-reader = easyocr.Reader(['es'], gpu=False)  # Disable GPU to avoid server errors
-# Warm-up with a dummy image to download weights if needed
+reader = easyocr.Reader(['es'], gpu=False)
 dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
 reader.readtext(dummy_img)
 logger.info("EasyOCR reader ready.")
@@ -43,12 +49,6 @@ logger.info("EasyOCR reader ready.")
 # Utility functions
 # ----------------------------------------------------------
 def desleet_text(text: str) -> tuple[str, int]:
-    """
-    Convert leet speak text to regular text.
-
-    Returns:
-        A tuple of (cleaned text, number of modifications)
-    """
     leet_dict = {
         '4': 'A', '@': 'A',
         '8': 'B',
@@ -63,8 +63,6 @@ def desleet_text(text: str) -> tuple[str, int]:
     }
 
     modificaciones_leet = 0
-
-    # Divide text into tokens (words, spaces)
     tokens = re.findall(r'\S+|\s+', text)
     resultado = ""
 
@@ -90,16 +88,12 @@ def desleet_text(text: str) -> tuple[str, int]:
     longitud = len(texto_sin_espacios)
 
     if longitud > 0 and modificaciones_leet >= (longitud / 2):
-        # Too many modifications? Probably false positive.
         return text.upper(), 0
     else:
         return resultado, modificaciones_leet
 
 
 def clean_text(text: str) -> str:
-    """
-    Remove unwanted characters and normalize OCR text.
-    """
     text = text.strip()
     text = re.sub(r'[^A-Za-z0-9ñÑáéíóúÁÉÍÓÚ.,€$ \-]', '', text)
     replacements = {
@@ -112,25 +106,12 @@ def clean_text(text: str) -> str:
 
 
 def read_imagefile(file_bytes: bytes) -> np.ndarray:
-    """
-    Convert uploaded file bytes into a NumPy image array using OpenCV.
-    """
     image_data = np.frombuffer(file_bytes, np.uint8)
     img = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
     return img
 
 
-async def run_ocr_with_timeout(img: np.ndarray, timeout: int = 10):
-    """
-    Run OCR with a timeout to prevent hanging requests.
-
-    Args:
-        img (np.ndarray): Input image.
-        timeout (int): Timeout in seconds.
-
-    Returns:
-        List of OCR results.
-    """
+async def run_ocr_with_timeout(img: np.ndarray, timeout: int = 15):
     loop = asyncio.get_event_loop()
     try:
         result = await asyncio.wait_for(
@@ -142,13 +123,10 @@ async def run_ocr_with_timeout(img: np.ndarray, timeout: int = 10):
         raise TimeoutError("OCR processing timed out.")
 
 
-def log_system_resources():
-    """
-    Logs current CPU and RAM usage.
-    """
+def log_system_resources(prefix=""):
     cpu_percent = psutil.cpu_percent(interval=1)
     mem = psutil.virtual_memory()
-    logger.info(f"CPU usage: {cpu_percent:.2f}%, RAM usage: {mem.percent:.2f}% "
+    logger.info(f"{prefix}CPU usage: {cpu_percent:.2f}%, RAM usage: {mem.percent:.2f}% "
                 f"({mem.used / (1024 ** 2):.2f} MB / {mem.total / (1024 ** 2):.2f} MB)")
 
 
@@ -156,27 +134,25 @@ def log_system_resources():
 # API Endpoint
 # ----------------------------------------------------------
 @app.post("/ocr")
-async def ocr_endpoint(file: UploadFile = File(...)):
+async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
     """
     Receive an uploaded image, perform OCR, and return the extracted text.
-
-    Steps:
-    1. Read the file and decode it as an image.
-    2. Run OCR with a timeout.
-    3. Clean the text using custom functions.
-    4. Return JSON with original, cleaned texts and confidence levels.
-    5. Log system resources for debugging.
+    Logs client info, system resources, and cleans memory after processing.
     """
+    request_id = str(uuid.uuid4())
+    client_host = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "unknown")
+    logger.info(f"[{request_id}] Received OCR request from {client_host} with User-Agent: {user_agent}")
+
     try:
-        logger.info("Received OCR request.")
-        log_system_resources()
+        log_system_resources(prefix=f"[{request_id}] Before OCR: ")
 
         contents = await file.read()
         img = read_imagefile(contents)
-        logger.info(f"Image shape: {img.shape}")
+        logger.info(f"[{request_id}] Image shape: {img.shape}")
 
-        results = await run_ocr_with_timeout(img, timeout=10)
-        logger.info(f"OCR completed with {len(results)} results.")
+        results = await run_ocr_with_timeout(img, timeout=15)
+        logger.info(f"[{request_id}] OCR completed with {len(results)} results.")
 
         original_texts = []
         cleaned_texts = []
@@ -189,17 +165,29 @@ async def ocr_endpoint(file: UploadFile = File(...)):
             confidences.append(round(conf, 2))
 
         response_data = {
+            "request_id": request_id,
             "original_texts": original_texts,
             "cleaned_texts": cleaned_texts,
-            "confidences": confidences
+            "confidences": confidences,
         }
+
+        # Memory cleanup
+        del img
+        del results
+        del contents
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        log_system_resources(prefix=f"[{request_id}] After cleanup: ")
+
+        logger.info(f"[{request_id}] Finished processing request.")
 
         return JSONResponse(content=response_data)
 
     except TimeoutError as e:
-        logger.error("OCR request timed out.")
-        return JSONResponse(content={"error": str(e)}, status_code=504)
+        logger.error(f"[{request_id}] OCR request timed out.")
+        return JSONResponse(content={"error": str(e), "request_id": request_id}, status_code=504)
 
     except Exception as e:
-        logger.exception("Unexpected error in /ocr endpoint.")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        logger.exception(f"[{request_id}] Unexpected error in /ocr endpoint.")
+        return JSONResponse(content={"error": str(e), "request_id": request_id}, status_code=500)
