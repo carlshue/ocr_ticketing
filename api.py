@@ -133,6 +133,16 @@ def desleet_text(text: str) -> tuple[str, int]:
         return resultado, modificaciones_leet
 
 
+def convert_numpy_types(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return str(obj)  # fallback para otros tipos no serializables
+
 def clean_text(text: str) -> str:
     text = text.strip()
     text = re.sub(r'[^A-Za-z0-9ñÑáéíóúÁÉÍÓÚ.,€$ \-]', '', text)
@@ -208,10 +218,10 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
 
         response_data = {
             "request_id": request_id,
-            "original_texts": original_texts,
-            "cleaned_texts": cleaned_texts,
-            "confidences": confidences,
-            "bboxes": bboxes
+            "original_texts": [convert_numpy_types(x) for x in original_texts],
+            "cleaned_texts": [convert_numpy_types(x) for x in cleaned_texts],
+            "confidences": [convert_numpy_types(x) for x in confidences],
+            "bboxes": [convert_numpy_types(x) for x in bboxes],
         }
 
         # Memory cleanup
@@ -225,7 +235,7 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
 
         logger.info(f"[{request_id}] Finished processing request.")
 
-        return JSONResponse(content=response_data, dumps=lambda obj: json.dumps(obj, default=str))
+        return JSONResponse(content=response_data)
 
     except TimeoutError as e:
         logger.error(f"[{request_id}] OCR request timed out.")
