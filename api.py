@@ -14,6 +14,9 @@ from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+# Required libraries
 
 import easyocr
 import numpy as np
@@ -35,7 +38,12 @@ logger = logging.getLogger(__name__)
 # FastAPI app initialization
 # ----------------------------------------------------------
 app = FastAPI()
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # ----------------------------------------------------------
 # EasyOCR reader initialization and warm-up
 # ----------------------------------------------------------
