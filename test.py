@@ -6,6 +6,10 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 from collections import defaultdict
 import pandas as pd
+from collections import defaultdict
+from math import atan2, degrees
+    
+    
 # Asegúrate de que ocr_utils.py esté en la misma carpeta o en el PYTHONPATH
 from ocr_utils import (
     ensure_ocr_and_models,
@@ -15,6 +19,8 @@ from ocr_utils import (
     log_system_resources,
     cleanup_memory
 )
+
+test_path = "./test/3.png"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +35,7 @@ async def test_ocr_main():
     reader = ensure_ocr_and_models(lang='es')
 
     # 2. Leer la imagen
-    image_path = Path("./test/wawawiwa.png")
+    image_path = Path(test_path)
     if not image_path.exists():
         logger.error(f"El archivo {image_path} no existe.")
         return
@@ -123,57 +129,73 @@ async def test_ocr_main():
 
 
 
-    # Paso 1: Asociar cada texto con su centro y label de columna (X)
-    items = []
-    for idx, bbox in enumerate(processed['bboxes']):
-        center_x = int(np.mean([point[0] for point in bbox]))
-        center_y = int(np.mean([point[1] for point in bbox]))
-        text = processed['cleaned_texts'][idx]
-        col_label = labels[idx]
-        items.append({'x': center_x, 'y': center_y, 'text': text, 'col': col_label})
+    # Agrupar puntos por cluster
+    clusters = defaultdict(list)
+    for label, pt in zip(labels, centers_np):
+        clusters[label].append(pt)
 
-    # Paso 2: Clusterizar las filas por coordenada Y (alineación horizontal visual)
-    y_coords = np.array([[item['y']] for item in items])
-    row_db = DBSCAN(eps=20, min_samples=1).fit(y_coords)
-    row_labels = row_db.labels_
+    # Ordenar clusters de izquierda a derecha según la media de X
+    sorted_clusters = [
+        clusters[k] for k in sorted(clusters, key=lambda k: np.mean([pt[0] for pt in clusters[k]]))
+    ]
 
-    # Asociar a cada item su fila detectada
-    for item, row_label in zip(items, row_labels):
-        item['row'] = row_label
+    # Estimar ángulo medio horizontal
+    all_angles = []
+    for i in range(len(sorted_clusters)):
+        for j in range(i + 1, len(sorted_clusters)):
+            for pt_a in sorted_clusters[i]:
+                for pt_b in sorted_clusters[j]:
+                    dx = pt_b[0] - pt_a[0]
+                    dy = pt_b[1] - pt_a[1]
+                    if dx == 0:
+                        continue
+                    angle = degrees(atan2(dy, dx))
+                    all_angles.append(angle)
 
-    # Paso 3: Ordenar columnas de izquierda a derecha (por promedio X)
-    column_map = {
-        old: new for new, (old, _) in enumerate(sorted(
-            {item['col']: [] for item in items}.items(),
-            key=lambda kv: np.mean([i['x'] for i in items if i['col'] == kv[0]])
-        ))
-    }
+    average_angle = np.median(all_angles)
+    angle_tolerance = 6     # grados
+    max_vertical_dist = 40  # píxeles
 
-    # Paso 4: Crear estructura fila/columna vacía
-    max_row = max(item['row'] for item in items)
-    max_col = max(column_map.values())
+    # Conectar puntos entre columnas
+    connected = set()
 
-    # Crear matriz vacía
-    table_matrix = [["" for _ in range(max_col + 1)] for _ in range(max_row + 1)]
+    for i in range(len(sorted_clusters)):
+        col_a = sorted_clusters[i]
+        for pt_a in col_a:
+            best_match = None
+            best_score = None
+            best_pt = None
 
-    # Rellenar la matriz con los textos correctos
-    for item in items:
-        row = item['row']
-        col = column_map[item['col']]
-        if table_matrix[row][col]:  # ya hay algo → concatenar
-            table_matrix[row][col] += " " + item['text']
-        else:
-            table_matrix[row][col] = item['text']
+            for j in range(i + 1, len(sorted_clusters)):
+                col_b = sorted_clusters[j]
+                for pt_b in col_b:
+                    dx = pt_b[0] - pt_a[0]
+                    dy = pt_b[1] - pt_a[1]
+                    if dx <= 0:
+                        continue  # solo mirar hacia la derecha
+                    angle = degrees(atan2(dy, dx))
+                    angle_deviation = abs(angle - average_angle)
+                    if angle_deviation > angle_tolerance:
+                        continue
+                    if abs(dy) > max_vertical_dist:
+                        continue
 
-    # Crear DataFrame y mostrar
-    column_names = [f"Columna {i}" for i in range(max_col + 1)]
-    df = pd.DataFrame(table_matrix, columns=column_names)
+                    score = abs(dy) + angle_deviation * 5  # penalizamos el ángulo
+                    if best_match is None or score < best_score:
+                        best_score = score
+                        best_match = (tuple(pt_a), tuple(pt_b))
+                        best_pt = pt_b
 
-    print("\n--- Tabla resultante agrupada visualmente (clusters X, filas Y) ---")
-    print(df.to_string(index=False))
-
-
-
+            if best_match and (tuple(pt_a), tuple(best_pt)) not in connected:
+                cv2.line(
+                    img_copy,
+                    best_match[0],
+                    best_match[1],
+                    color=(180, 180, 180),
+                    thickness=1,
+                    lineType=cv2.LINE_AA
+                )
+                connected.add((tuple(pt_a), tuple(best_pt)))
 
 ##### END CLUSTERING ########
 
