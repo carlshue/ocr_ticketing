@@ -25,3 +25,4 @@ albucore
 packaging
 networkx
 torch
+scikit-learn

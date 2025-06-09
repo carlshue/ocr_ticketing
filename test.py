@@ -14,7 +14,7 @@ from collections import defaultdict, deque
 # Asegúrate de que ocr_utils.py esté en la misma carpeta o en el PYTHONPATH
 from ocr_utils import *
 
-test_path = "./test/3.png"
+test_path = "./test/0.png"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
