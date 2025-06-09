@@ -8,14 +8,7 @@ import asyncio
 
 import torch
 
-from ocr_utils import (
-    ensure_ocr_and_models,
-    read_imagefile,
-    run_ocr_with_timeout,
-    process_ocr_results,
-    log_system_resources,
-    cleanup_memory
-)
+from ocr_utils import *
 
 # ----------------------------------------------------------
 # Logging
@@ -49,37 +42,65 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
     request_id = str(uuid.uuid4())
     client_host = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
-    logger.info(f"[{request_id}] Received OCR request from {client_host} with User-Agent: {user_agent}")
+    logger.info(f"[{request_id}] Nueva petición OCR desde {client_host}, User-Agent: {user_agent}")
 
     try:
-        log_system_resources(prefix=f"[{request_id}] Before OCR: ")
+        log_system_resources(prefix=f"[{request_id}] Antes OCR: ")
 
         contents = await file.read()
         img = read_imagefile(contents)
-        logger.info(f"[{request_id}] Image shape: {img.shape}")
+        logger.info(f"[{request_id}] Imagen recibida con shape {img.shape}")
 
-        results = await run_ocr_with_timeout(reader, img, timeout=15)
-        logger.info(f"[{request_id}] OCR completed with {len(results[0]) if results and results[0] else 0} results.")
+        raw_results = await run_ocr_with_timeout(reader, img, timeout=15)
+        logger.info(f"[{request_id}] OCR terminado con {len(raw_results[0]) if raw_results and raw_results[0] else 0} resultados")
 
-        response_data = process_ocr_results(results)
-        response_data["request_id"] = request_id
+        processed = process_ocr_results(raw_results)
 
-        logger.info(f"[{request_id}] Response data prepared: {json.dumps(response_data, ensure_ascii=False)}")
+        # Corrección de skew
+        img_corrected, processed_corrected = rotate_image_and_boxes(img, processed["bboxes"],
+                                                                   estimate_skew_angle_from_ocr(processed["bboxes"]))
+        processed["bboxes"] = processed_corrected
 
-        # Memory cleanup
-        cleanup_memory(img, results, contents)
+        # Centros
+        centers = get_centers(processed["bboxes"])
+        if len(centers) == 0:
+            raise RuntimeError("No se detectaron centros en las cajas OCR")
+
+        # Clusterizado
+        labels = cluster_centers(centers, eps=50, min_samples=1)
+
+        # Imagen para dibujar conexiones (opcional)
+        img_debug = img_corrected.copy()
+
+        # Conexiones
+        connected = connect_clusters_lines(img_debug, centers, labels)
+
+        # Filas conectadas
+        connected_rows = build_connected_rows(connected)
+
+        # Construcción tabla DataFrame
+        df = build_table(processed, labels, connected_rows)
+
+        response_data = {
+            "request_id": request_id,
+            "table": df.fillna("").values.tolist(),
+            "columns": df.columns.tolist() if df.columns is not None else [],
+            "ocr_raw": processed,  # puedes eliminarlo si no quieres enviar el raw
+        }
+
+        logger.info(f"[{request_id}] Preparando respuesta.")
+
+        cleanup_memory(img, raw_results, contents)
         torch.cuda.empty_cache()
-
-        log_system_resources(prefix=f"[{request_id}] After cleanup: ")
-
-        logger.info(f"[{request_id}] Finished processing request.")
+        log_system_resources(prefix=f"[{request_id}] Después limpieza: ")
+        logger.info(f"[{request_id}] Petición finalizada.")
 
         return JSONResponse(content=response_data)
 
     except TimeoutError as e:
-        logger.error(f"[{request_id}] OCR request timed out.")
+        logger.error(f"[{request_id}] Timeout en OCR")
         return JSONResponse(content={"error": str(e), "request_id": request_id}, status_code=504)
 
     except Exception as e:
-        logger.exception(f"[{request_id}] Unexpected error in /ocr endpoint.")
+        logger.exception(f"[{request_id}] Error inesperado")
         return JSONResponse(content={"error": str(e), "request_id": request_id}, status_code=500)

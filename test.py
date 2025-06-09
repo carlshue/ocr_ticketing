@@ -8,17 +8,11 @@ from collections import defaultdict
 import pandas as pd
 from collections import defaultdict
 from math import atan2, degrees
-    
+from collections import defaultdict, deque
+
     
 # Asegúrate de que ocr_utils.py esté en la misma carpeta o en el PYTHONPATH
-from ocr_utils import (
-    ensure_ocr_and_models,
-    read_imagefile,
-    run_ocr_with_timeout,
-    process_ocr_results,
-    log_system_resources,
-    cleanup_memory
-)
+from ocr_utils import *
 
 test_path = "./test/3.png"
 
@@ -55,6 +49,17 @@ async def test_ocr_main():
 
     # 4. Procesar resultados
     processed = process_ocr_results(results)
+    bboxes = processed.get("bboxes", [])
+
+    # 4.1 Estimar ángulo de inclinación
+    skew_angle = estimate_skew_angle_from_ocr(bboxes)
+    logger.info(f"Ángulo de inclinación estimado: {skew_angle:.2f}°")
+
+    # 4.2 Rotar imagen y cajas para corregir skew
+    img, rotated_bboxes = rotate_image_and_boxes(img, bboxes, skew_angle)
+    img_copy = img.copy()  # Actualizamos también img_copy
+    processed["bboxes"] = rotated_bboxes
+
 
     # 5. Mostrar resultados por pantalla
     logger.info("Resultados OCR:")
@@ -199,6 +204,79 @@ async def test_ocr_main():
 
 ##### END CLUSTERING ########
 
+    # Crear grafo bidireccional a partir de las conexiones detectadas
+    graph = defaultdict(list)
+    for pt_a, pt_b in connected:
+        graph[pt_a].append(pt_b)
+        graph[pt_b].append(pt_a)
+
+    # Buscar componentes conectados (grupos de puntos) => representan una fila del ticket
+    visited = set()
+    connected_rows = []  # este es el antiguo 'rows'
+
+    for node in graph:
+        if node in visited:
+            continue
+        queue = deque([node])
+        group = []
+
+        while queue:
+            curr = queue.popleft()
+            if curr in visited:
+                continue
+            visited.add(curr)
+            group.append(curr)
+            for neighbor in graph[curr]:
+                if neighbor not in visited:
+                    queue.append(neighbor)
+
+        if len(group) >= 2:  # filtramos grupos muy pequeños
+            connected_rows.append(group)
+
+    # Mapear coordenadas (centros) a texto y cluster asignado
+    center_to_text = {}
+    center_to_cluster = {}
+
+    for (bbox, text), label in zip(zip(processed.get("bboxes", []), processed.get("cleaned_texts", [])), labels):
+        center_x = int(np.mean([p[0] for p in bbox]))
+        center_y = int(np.mean([p[1] for p in bbox]))
+        center = (center_x, center_y)
+        center_to_text[center] = text.strip()
+        center_to_cluster[center] = label
+
+    # Ordenar clusters (etiquetas de DBSCAN) de izquierda a derecha
+    unique_clusters = sorted(set(labels))
+    cluster_index_map = {cluster_id: idx for idx, cluster_id in enumerate(unique_clusters)}  # cluster -> columna
+
+    # Construir tabla alineando textos por su cluster
+    table_data = []
+
+    for group in connected_rows:
+        row_dict = {}  # columna_index -> texto
+        y_vals = []
+
+        for pt in group:
+            text = center_to_text.get(pt, "")
+            cluster = center_to_cluster.get(pt)
+            col_idx = cluster_index_map.get(cluster, 0)
+            row_dict[col_idx] = text
+            y_vals.append(pt[1])
+
+        # Construir fila con columnas fijas
+        max_cols = max(cluster_index_map.values()) + 1
+        row = [row_dict.get(i, "") for i in range(max_cols)]
+
+        avg_y = np.mean(y_vals)
+        table_data.append((avg_y, row))
+
+    # Ordenar filas por eje Y (de arriba hacia abajo)
+    table_data.sort(key=lambda x: x[0])
+
+    # Crear DataFrame final
+    df = pd.DataFrame([row for _, row in table_data])
+
+    print("\n===== TABLA RECONSTRUIDA DESDE OCR (USANDO CLUSTERS COMO COLUMNAS Y ORDEN Y) =====\n")
+    print(df.fillna(""))
 
     # Mostrar imagen con resultados (sin cajas, solo texto)
     cv2.imshow("OCR Resultados", img_copy)
