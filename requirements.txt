@@ -1,8 +1,26 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.3
-easyocr==1.7.2
 opencv-python-headless==4.11.0.86
 numpy==1.26.4
 pandas==2.1.3
 python-multipart
 psutil==5.9.8
+paddleocr
+shapely
+scikit-image
+pyclipper
+lmdb
+tqdm
+numpy
+rapidfuzz
+opencv-python
+opencv-contrib-python
+cython
+Pillow
+pyyaml
+requests
+albumentations
+# to be compatible with albumentations
+albucore
+packaging
+networkx
