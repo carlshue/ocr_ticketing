@@ -36,9 +36,9 @@ app.add_middleware(
 # ----------------------------------------------------------
 # PaddleOCR reader initialization
 # ----------------------------------------------------------
-logger.info("Initializing PaddleOCR reader...")
-reader = ensure_ocr_and_models(lang='es')
-logger.info("PaddleOCR reader ready.")
+logger.info("PaddleOCR is currently down...")
+reader = None#ensure_ocr_and_models(lang='es')
+logger.info("PaddleOCR is currently down...")
 
 
 # ----------------------------------------------------------
@@ -46,6 +46,11 @@ logger.info("PaddleOCR reader ready.")
 # ----------------------------------------------------------
 @app.post("/ocr")
 async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
+    
+    print("not currently supported PaddleOCR is currently down...")
+    return JSONResponse(content={"PaddleOCR OCR SERVERSIDE IS DOWN."}, status_code=500)
+
+    
     request_id = str(uuid.uuid4())
     client_host = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
