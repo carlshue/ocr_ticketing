@@ -13,6 +13,9 @@ import numpy as np
 from collections import defaultdict
 from sklearn.cluster import DBSCAN
 import torch
+from fastapi.responses import FileResponse
+import os
+from pathlib import Path
 
 from ocr_utils import *
 
@@ -162,15 +165,11 @@ async def ocr_json_endpoint(request: Request):
             ]
             bboxes.append(bbox)
 
-        print(bboxes)
-        print('UNSKEWING BBOXES')
-        unsk_bboxes = unskew_boxes(bboxes)
-        print(unsk_bboxes)
         processed = {
             "original_texts": original_texts,
             "cleaned_texts": cleaned_texts,
             "confidences": [1.0] * len(original_texts),
-            "bboxes": unsk_bboxes,
+            "bboxes": bboxes,
         }
 
         #OLD
@@ -179,13 +178,13 @@ async def ocr_json_endpoint(request: Request):
         #
         # New:
         
-        centers = get_centers(unsk_bboxes)
-        labels = vertical_aligned_clustering(unsk_bboxes)
+        centers = get_centers(bboxes)
+        labels = vertical_aligned_clustering(bboxes)
 
         # Asumiendo connect_clusters_lines y build_connected_rows están definidas
         #connected = connect_clusters_lines(np.zeros((1, 1, 3), dtype=np.uint8), centers, labels)
         #connected_rows = build_connected_rows(connected)
-        connected_rows = build_rows_from_centers(centers,unsk_bboxes)
+        connected_rows = build_rows_from_centers(centers,bboxes)
         df = build_table(processed, labels, connected_rows)
 
         logger.info("Tabla construida:\n", df.to_string(index=False))
@@ -197,3 +196,11 @@ async def ocr_json_endpoint(request: Request):
     except Exception as e:
         logger.exception("Error procesando /ocr-json")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+    
+    
+BASE_DIR = Path(__file__).resolve().parent
+INDEX_PATH = os.path.join(BASE_DIR, "static", "index.html")
+
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str):
+    return FileResponse(INDEX_PATH)
