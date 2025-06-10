@@ -14,7 +14,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Instala paddlepaddle CPU desde índice oficial chino
-RUN pip install --no-cache-dir paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+#RUN pip install --no-cache-dir paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
 
 # Instala el resto de dependencias
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
