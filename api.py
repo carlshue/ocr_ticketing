@@ -5,7 +5,13 @@ import uuid
 import json
 import logging
 import asyncio
-
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import logging
+import json
+import numpy as np
+from collections import defaultdict
+from sklearn.cluster import DBSCAN
 import torch
 
 from ocr_utils import *
@@ -33,6 +39,7 @@ app.add_middleware(
 logger.info("Initializing PaddleOCR reader...")
 reader = ensure_ocr_and_models(lang='es')
 logger.info("PaddleOCR reader ready.")
+
 
 # ----------------------------------------------------------
 # OCR Endpoint
@@ -104,3 +111,84 @@ async def ocr_endpoint(request: Request, file: UploadFile = File(...)):
     except Exception as e:
         logger.exception(f"[{request_id}] Error inesperado")
         return JSONResponse(content={"error": str(e), "request_id": request_id}, status_code=500)
+    
+    
+    
+# ----------------------------------------------------------
+# Nuevo Endpoint: /ocr-json
+'''
+
+desleet_text
+get_centers
+cluster_centers
+connect_clusters_lines
+build_connected_rows
+build_table
+'''
+
+
+# ----------------------------------------------------------
+@app.post("/ocr-json")
+async def ocr_json_endpoint(request: Request):
+    try:
+        payload = await request.json()
+        logger.info("Recibido JSON en /ocr-json")
+        elements = payload.get("elements", [])
+
+        original_texts = []
+        cleaned_texts = []
+        bboxes = []
+        for el in elements:
+            text = el.get("text", "")
+            cleaned, _ = desleet_text(clean_text(text))
+            cleaned_texts.append(cleaned)
+            original_texts.append(text)
+
+            left = el["boundingBox"]["left"]
+            top = el["boundingBox"]["top"]
+            right = el["boundingBox"]["right"]
+            bottom = el["boundingBox"]["bottom"]
+
+            bbox = [
+                [left, top],
+                [right, top],
+                [right, bottom],
+                [left, bottom]
+            ]
+            bboxes.append(bbox)
+
+        print(bboxes)
+        print('UNSKEWING BBOXES')
+        unsk_bboxes = unskew_boxes(bboxes)
+        print(unsk_bboxes)
+        processed = {
+            "original_texts": original_texts,
+            "cleaned_texts": cleaned_texts,
+            "confidences": [1.0] * len(original_texts),
+            "bboxes": unsk_bboxes,
+        }
+
+        #OLD
+        #centers = get_centers(bboxes)
+        #labels = cluster_centers(centers, eps=50, min_samples=1)
+        #
+        # New:
+        
+        centers = get_centers(unsk_bboxes)
+        labels = vertical_aligned_clustering(unsk_bboxes)
+
+        # Asumiendo connect_clusters_lines y build_connected_rows están definidas
+        #connected = connect_clusters_lines(np.zeros((1, 1, 3), dtype=np.uint8), centers, labels)
+        #connected_rows = build_connected_rows(connected)
+        connected_rows = build_rows_from_centers(centers,unsk_bboxes)
+        df = build_table(processed, labels, connected_rows)
+
+        logger.info("Tabla construida:\n", df.to_string(index=False))
+        print("Tabla construida:\n", df.to_string(index=False))
+
+
+        return JSONResponse(content={"status": "ok", "rows": df.to_dict(orient="records")})
+
+    except Exception as e:
+        logger.exception("Error procesando /ocr-json")
+        return JSONResponse(content={"error": str(e)}, status_code=500)

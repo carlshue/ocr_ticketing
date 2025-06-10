@@ -7,7 +7,7 @@ import psutil
 import torch
 import gc
 from pathlib import Path
-from math import atan2, degrees
+from math import atan2, degrees, radians, sin
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -183,6 +183,31 @@ def estimate_skew_angle_from_ocr(bboxes, min_box_width=20):
     return np.median(angles)
 
 
+def unskew_boxes(bboxes):
+    """
+    Aplica una rotación inversa a todas las cajas (bboxes) en función del ángulo estimado,
+    rotándolas alrededor del origen (0, 0) para corregir la inclinación.
+    """
+    angle_deg = estimate_skew_angle_from_ocr(bboxes)
+    print(f"🔁 Ángulo de inclinación detectado: {angle_deg:.2f}°")
+
+    angle_rad = radians(-angle_deg)  # Inverso para corregir inclinación
+    cos_theta = np.cos(angle_rad)
+    sin_theta = sin(angle_rad)
+
+    def rotate_point(x, y):
+        new_x = x * cos_theta - y * sin_theta
+        new_y = x * sin_theta + y * cos_theta
+        return [new_x, new_y]
+
+    unskewed_bboxes = []
+    for bbox in bboxes:
+        rotated_box = [rotate_point(x, y) for (x, y) in bbox]
+        unskewed_bboxes.append(rotated_box)
+
+    return unskewed_bboxes
+
+
 def rotate_image_and_boxes(img, bboxes, angle_deg):
     """
     Rota la imagen y también ajusta las coordenadas de las cajas.
@@ -283,6 +308,71 @@ def cluster_centers(centers, eps=50, min_samples=1):
     return db.labels_
 
 
+
+#V2 
+def vertical_aligned_clustering(bboxes, threshold=0):
+    import numpy as np
+
+    def bbox_edges(bbox):
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        return min(xs), max(xs), min(ys), max(ys)
+
+    def intersects_vertically(line_x, bbox, threshold=0):
+        left, right, top, bottom = bbox_edges(bbox)
+        return (left - threshold <= line_x <= right + threshold)
+
+    def intersects_horizontally(line_y, bbox, threshold=0):
+        _, _, top, bottom = bbox_edges(bbox)
+        return (top - threshold <= line_y <= bottom + threshold)
+
+    def get_vertical_lines_from_bbox(bbox):
+        xs = [p[0] for p in bbox]
+        return [min(xs), max(xs), int(np.mean(xs))]
+
+    n = len(bboxes)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        root_x = find(x)
+        root_y = find(y)
+        if root_x != root_y:
+            parent[root_y] = root_x
+
+    # Tirar líneas verticales y unir grupos
+    for i, bbox_i in enumerate(bboxes):
+        vertical_lines = get_vertical_lines_from_bbox(bbox_i)
+
+        for x_line in vertical_lines:
+            intersecting = []
+            for j, bbox_j in enumerate(bboxes):
+                if intersects_vertically(x_line, bbox_j, threshold):
+                    intersecting.append(j)
+
+            if len(intersecting) > 1:
+                for idx in intersecting[1:]:
+                    union(intersecting[0], idx)
+
+    # Generar labels
+    label_map = {}
+    labels = []
+    current_label = 0
+    for i in range(n):
+        root = find(i)
+        if root not in label_map:
+            label_map[root] = current_label
+            current_label += 1
+        labels.append(label_map[root])
+
+    return np.array(labels)
+
+
 def label_clusters_on_image(img, centers, labels):
     for (x, y), label in zip(centers, labels):
         cv2.putText(
@@ -298,6 +388,7 @@ def label_clusters_on_image(img, centers, labels):
 
 
 def connect_clusters_lines(img, centers, labels):
+
     clusters = defaultdict(list)
     for label, pt in zip(labels, centers):
         clusters[label].append(pt)
@@ -380,34 +471,180 @@ def build_connected_rows(connected):
     return connected_rows
 
 
+def build_rows_from_centers(centers, bboxes, y_threshold=0, dynamic_threshold=True):
+    """
+    Agrupa centros alineados horizontalmente en filas basadas en cercanía en Y.
+    
+    - Si dynamic_threshold=True, el threshold se calcula como la altura media de las cajas * 0.7.
+    - centers: lista de [x, y]
+    - bboxes: lista de listas de puntos [[(x1, y1), (x2, y2), ...]]
+    """
+    # Calcular threshold dinámico basado en altura media
+    if dynamic_threshold and bboxes:
+        heights = [max(p[1] for p in bbox) - min(p[1] for p in bbox) for bbox in bboxes]
+        avg_height = np.mean(heights)
+        y_threshold = avg_height * 0.7
+
+    # Ordenar por Y
+    centers = sorted(centers, key=lambda c: c[1])
+    rows = []
+
+    for pt in centers:
+        added = False
+        for row in rows:
+            row_y = np.mean([p[1] for p in row])
+            if abs(pt[1] - row_y) <= y_threshold:
+                row.append(pt)
+                added = True
+                break
+        if not added:
+            rows.append([pt])
+
+    return rows
+
+
+
 def build_table(processed, labels, connected_rows):
-    center_to_text = {}
-    center_to_cluster = {}
+    bboxes = processed["bboxes"]
+    original_texts = processed["original_texts"]
+    cleaned_texts = processed["cleaned_texts"]
 
-    for (bbox, text), label in zip(zip(processed.get("bboxes", []), processed.get("cleaned_texts", [])), labels):
-        center_x = int(np.mean([p[0] for p in bbox]))
-        center_y = int(np.mean([p[1] for p in bbox]))
-        center_to_text[(center_x, center_y)] = text.strip()
-        center_to_cluster[(center_x, center_y)] = label
+    # Map label -> lista de índices de bboxes en esa columna
+    col_to_indices = {}
+    for idx, label in enumerate(labels):
+        col_to_indices.setdefault(label, []).append(idx)
 
-    unique_clusters = sorted(set(labels))
-    cluster_index_map = {cluster_id: idx for idx, cluster_id in enumerate(unique_clusters)}
+    # Map centro (x,y) a índice para acceder rápido
+    centers = get_centers(bboxes)
+    centers_tuples = [tuple(map(int, c)) for c in centers]
+    center_to_idx = {c: i for i, c in enumerate(centers_tuples)}
 
-    table_data = []
-    for group in connected_rows:
-        row_dict = {}
-        y_vals = []
-        for pt in group:
-            text = center_to_text.get(pt, "")
-            cluster = center_to_cluster.get(pt)
-            col_idx = cluster_index_map.get(cluster, 0)
-            row_dict[col_idx] = text
-            y_vals.append(pt[1])
-        max_cols = max(cluster_index_map.values()) + 1
-        row = [row_dict.get(i, "") for i in range(max_cols)]
-        avg_y = np.mean(y_vals)
-        table_data.append((avg_y, row))
+    table_rows = []
+    for row_centers in connected_rows:
+        # Para cada fila, tenemos un conjunto de centros (x,y) que están conectados horizontalmente
+        # Queremos ordenar por x y extraer la celda (texto) correspondiente
 
-    table_data.sort(key=lambda x: x[0])
-    df = pd.DataFrame([row for _, row in table_data])
+        # Ordenar los centros por x para fila
+        row_centers_sorted = sorted(row_centers, key=lambda c: c[0])
+
+        # Crear fila de la tabla, inicial con valores vacíos para todas las columnas
+        max_col = max(labels) if len(labels) > 0 else -1
+        row_data = [""] * (max_col + 1)
+
+        for center in row_centers_sorted:
+            idx = center_to_idx.get(tuple(map(int, center)))
+            if idx is None:
+                continue
+            col = labels[idx]
+            text = cleaned_texts[idx]
+            # Podrías hacer merge de textos si hay más de uno en esa celda,
+            # pero en esta versión simple ponemos solo uno por celda.
+            if row_data[col]:
+                row_data[col] += " " + text
+            else:
+                row_data[col] = text
+
+        table_rows.append(row_data)
+
+    # Construimos DataFrame
+    df = pd.DataFrame(table_rows)
+
     return df
+
+
+def build_table_from_lines(bboxes, texts, y_threshold=10, x_gap_threshold=40):
+    """
+    Construye la tabla a partir de las líneas agrupadas y palabras unidas.
+    Aquí asumimos que cada línea es una fila y cada frase es una celda.
+    """
+    # Agrupa y une palabras en líneas
+    lines = group_words_in_lines(bboxes, texts, y_threshold, x_gap_threshold)
+    # Por simplicidad, cada línea es una fila y cada frase dentro de la línea puede dividirse por tabulaciones u otro criterio
+    # Aquí retornamos un DataFrame con una columna "Item" con la línea completa
+    import pandas as pd
+    df = pd.DataFrame({"Item": lines})
+    return df
+
+
+def group_words_in_lines(bboxes, texts, y_threshold=10, x_gap_threshold=40):
+    """
+    Agrupa palabras en líneas, y dentro de cada línea concatena palabras que están próximas horizontalmente.
+    
+    Args:
+        bboxes: lista de bounding boxes, cada bbox = [(x1,y1), (x2,y2), ...]
+        texts: lista de textos detectados correspondiente a cada bbox
+        y_threshold: máxima distancia vertical para considerar palabras en la misma línea
+        x_gap_threshold: máxima distancia horizontal entre palabras para unirlas
+    
+    Returns:
+        lines: lista de strings, cada string es una línea unida
+    """
+    # Calcular centro de cada bbox
+    centers = [(int(np.mean([p[0] for p in bbox])), int(np.mean([p[1] for p in bbox]))) for bbox in bboxes]
+    
+    # Agrupar por líneas: clusterizar por Y
+    lines = []
+    current_line = []
+    current_y = None
+    
+    # Ordenar por Y para ir procesando líneas de arriba hacia abajo
+    sorted_items = sorted(zip(bboxes, texts, centers), key=lambda x: x[2][1])
+    
+    for bbox, text, (cx, cy) in sorted_items:
+        if current_y is None:
+            current_y = cy
+            current_line = [(bbox, text, cx)]
+            continue
+        
+        if abs(cy - current_y) <= y_threshold:
+            current_line.append((bbox, text, cx))
+        else:
+            # Procesar línea anterior
+            line_text = merge_line_words(current_line, x_gap_threshold)
+            lines.append(line_text)
+            # Nueva línea
+            current_line = [(bbox, text, cx)]
+            current_y = cy
+            
+    # Procesar última línea
+    if current_line:
+        line_text = merge_line_words(current_line, x_gap_threshold)
+        lines.append(line_text)
+    
+    return lines
+
+
+def merge_line_words(line_items, x_gap_threshold):
+    """
+    Une palabras en una línea, según distancia horizontal
+    
+    Args:
+        line_items: lista de (bbox, text, cx) en la línea
+        x_gap_threshold: máxima distancia horizontal entre palabras para unirlas
+    
+    Returns:
+        string con palabras concatenadas separadas por espacio
+    """
+    # Ordenar por X
+    line_items = sorted(line_items, key=lambda x: x[2])
+    
+    merged_words = []
+    prev_x = None
+    prev_text = ""
+    
+    for _, text, cx in line_items:
+        if prev_x is None:
+            prev_x = cx
+            prev_text = text
+        else:
+            if cx - prev_x <= x_gap_threshold:
+                # Si están cerca, unir con espacio
+                prev_text += " " + text
+            else:
+                # Separar palabras con mucha distancia
+                merged_words.append(prev_text)
+                prev_text = text
+            prev_x = cx
+    merged_words.append(prev_text)
+    
+    return " ".join(merged_words)
