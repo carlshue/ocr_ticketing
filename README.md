@@ -6,7 +6,7 @@ This project is a Flutter application that allows users to capture photos of tic
 
 ---
 
-## Architecture Overview
+## Execution flow
 
 ```mermaid
 flowchart TD
@@ -22,7 +22,7 @@ flowchart TD
     
     %% Clickable link to repo
     R8:::clickable
-    click R8 "[https://github.com/carlshue/ocr_ticketing](https://github.com/carlshue/ocr_app/tree/main)" "Go to user-side repo"
+    click R8 "https://github.com/carlshue/ocr_app/tree/main" "Go to user-side repo"
 
 
 ```
