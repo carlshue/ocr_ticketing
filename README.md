@@ -10,23 +10,20 @@ This project is a Flutter application that allows users to capture photos of tic
 
 ```mermaid
 flowchart TD
-    A["Flutter App / User"] --> B["Capture ticket image"]
-    B --> C["Send image to Server on Railway"]
-    C --> D["Server Processing"]
+    %% Server-side OCR
+    SRV["OCR Server (FastAPI)"] --> R1["Receive image / JSON payload"]
+    R1 --> R2["Read & decode image"]
+    R2 --> R3["Run OCR (PaddleOCR)"]
+    R3 --> R4["Clean text & desleet"]
+    R4 --> R5["Correct skew if needed"]
+    R5 --> R6["Compute centers & cluster columns"]
+    R6 --> R7["Reconstruct table (DataFrame)"]
+    R7 --> R8["Return structured JSON to client"]
+    
+    %% Clickable link to repo
+    R8:::clickable
+    click R8 "[https://github.com/carlshue/ocr_ticketing](https://github.com/carlshue/ocr_app/tree/main)" "Go to user-side repo"
 
-    %% Server-side steps
-    D --> D1["Read image & convert to NumPy array"]
-    D --> D2["OCR with PaddleOCR (text + bounding boxes)"]
-    D --> D3["Text cleaning & normalization (desleet, remove noise)"]
-    D --> D4["Skew detection & correction"]
-    D --> D5["Clustering & alignment (rows & columns)"]
-    D --> D6["Table reconstruction (DataFrame)"]
-    D --> D7["Optional visualization & debugging"]
-
-    %% Output
-    D6 --> E["Structured ticket table (JSON)"]
-    E --> F["Return processed data to Flutter App"]
-    F --> G["Store ticket locally / display to user"]
 
 ```
 
